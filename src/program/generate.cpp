@@ -72,6 +72,7 @@
 #include "strata/program/split_ring.hpp"
 #include "strata/program/draft_kv_plan.hpp"
 #include "strata/program/gfx1150_890m.hpp"
+#include "strata/program/890m_trials.hpp"
 #include "strata/program/mtp_prob3_890m.hpp"
 #include "strata/program/message_boundary.hpp"
 #include "strata/spec/draft_policy.hpp"
@@ -2190,6 +2191,17 @@ int main(int argc, char** argv) {
                 setenv("STRATA_GFX1150_FAST", "2", 1);
 #endif
                 std::fprintf(stderr, "strata: opt-in Radeon 890M fused prefill/GEMM (gfx1150 fast=2); validate logits and speed\n");
+            }
+            // Experiments are rejected on every non-890M GPU, even other gfx1150 devices.
+            if (const char* trial = std::getenv("STRATA_890M_TRIAL"); trial && *trial) {
+                if (!strata::program::is_radeon_890m(ad.name, ad.gcnArchName, ad.multiProcessorCount)) {
+                    std::fprintf(stderr, "STRATA_890M_TRIAL needs Radeon 890M (gfx1150, 16 CUs)\n");
+                    return 2;
+                }
+                if (!strata::program::apply_890m_trial(trial)) {
+                    std::fprintf(stderr, "unknown STRATA_890M_TRIAL=%s\n", trial);
+                    return 2;
+                }
             }
             strata::core::apply_arch_defaults(ad.gcnArchName);
         } else {
