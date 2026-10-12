@@ -27,6 +27,11 @@ inline bool apply_890m_trial(const char* trial) {
         std::fprintf(stderr, "strata 890M trial: fused (opt-in, validate outputs and speed)\n");
         return true;
     }
+    if (std::strcmp(trial, "gemm") == 0) {
+        add("STRATA_PF_GEMM", "1");
+        std::fprintf(stderr, "strata 890M trial: gemm (opt-in, validate outputs and speed)\n");
+        return true;
+    }
     return false;
 }
 } // namespace strata::program
