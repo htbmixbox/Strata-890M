@@ -53,6 +53,14 @@ inline bool apply_890m_trial(const char* trial) {
         std::fprintf(stderr, "strata 890M trial: wmma-gemm (opt-in, validate outputs and speed)\n");
         return true;
     }
+    if (std::strcmp(trial, "wmma-fused-gemm") == 0) {
+        add("STRATA_HIP_WMMA", "1");
+        add("STRATA_PF_FUSED", "1");
+        add("STRATA_PF_GEMM", "1");
+        add("STRATA_PF_SWITCH_MIN_T", "4096");
+        std::fprintf(stderr, "strata 890M trial: wmma-fused-gemm (opt-in, validate outputs and speed)\n");
+        return true;
+    }
     return false;
 }
 } // namespace strata::program
