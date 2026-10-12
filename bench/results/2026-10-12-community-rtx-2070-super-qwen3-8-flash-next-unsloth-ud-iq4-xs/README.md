@@ -7,7 +7,7 @@ Measured on 2026-10-12 with `tools/strata_bench.py` (suite 1, 3 runs per test, m
 - GPU and VRAM: NVIDIA GeForce RTX 2070 SUPER, 8 GiB VRAM
 - CPU: AMD Ryzen AI 9 HX 470 w/ Radeon 890M (12 cores, 24 threads); installed RAM: 93.4 GiB; storage: not measured
 - OS: Linux 7.0.0-38-generic; GPU driver: 615.71.09; CUDA: not read
-- Strata: project 0.1.43, commit b45fc5d4; engine 0.1.43
+- Strata: project 0.1.43, commit aad118a4; engine 0.1.43
 - Background workloads and power limits: not recorded
 
 ## Model and configuration
@@ -35,28 +35,28 @@ Run by `python tools/strata_bench.py` against the HTTP API of a Strata server (s
 
 | Configuration | Actual prompt tokens | Reused tokens | Generated tokens | Runs | Prompt tok/s median and range | Decode tok/s median and range | TTFT seconds median and range |
 | --- | ---: | ---: | ---: | ---: | --- | --- | --- |
-| short chat | 46 (43-51) | 0 | 100 (100-100) | 9 | not measured | 16.0 (13.5-21.8) | 1.56 (1.43-1.71) |
-| 4K prompt, fresh | 4019 (4019-4019) | 0 (0-0) | 24 cap | 3 | 228.9 (225.2-230.6) | not measured | 17.67 (17.54-17.95) |
-| 16K prompt, fresh | 16058 (16058-16058) | 0 (0-0) | 24 cap | 3 | 233.2 (232.8-234.0) | not measured | 69.02 (68.78-69.13) |
-| agent session, follow-up turns | 14507 (14470-14523) at the last turn | see below | up to 64 | 3 | see below | 15.3 (14.0-19.5) | 15.55 (9.34-18.79) |
+| short chat | 46 (43-51) | 0 | 100 (100-100) | 9 | not measured | 14.2 (11.9-22.0) | 1.42 (1.26-1.78) |
+| 4K prompt, fresh | 4019 (4019-4019) | 0 (0-0) | 24 cap | 3 | 266.1 (265.1-269.8) | not measured | 15.20 (15.00-15.27) |
+| 16K prompt, fresh | 16058 (16058-16058) | 0 (0-0) | 24 cap | 3 | 273.4 (168.3-287.0) | not measured | 58.86 (56.10-95.56) |
+| agent session, follow-up turns | 14491 (14485-14514) at the last turn | see below | up to 64 | 3 | see below | 16.5 (14.1-21.0) | 13.18 (7.96-14.57) |
 
 Ranges are the lowest and highest of the runs; `Runs` counts requests that returned a token.
 
 ### Agent session (conversation cache)
 
-Cache hit over the follow-up turns: 68.8 % (68.5-68.8); earlier-turn tokens read again per session: 2 (1-144) (earlier turns that the cache did not hold; the 13635 (13635-13636) new tokens of the files are read once); first turn (nothing cached) first token: 5.28 s (5.27-5.45).
+Cache hit over the follow-up turns: 68.8 % (68.8-68.9); earlier-turn tokens read again per session: 2 (2-4) (earlier turns that the cache did not hold; the 13634 (13633-13636) new tokens of the files are read once); first turn (nothing cached) first token: 5.06 s (5.04-5.09).
 
 | Turn (run 1) | Prompt tokens | Reused | Read | Prompt tok/s | First token (s) | Decode tok/s |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0 | 609 | 0 | 609 | 119.7 | 5.277 | 15.3 |
-| 1 | 3716 | 634 | 3082 | 194.0 | 16.196 | 19.5 |
-| 2 | 5249 | 3709 | 1540 | 159.0 | 9.862 | 14.3 |
-| 3 | 8693 | 5242 | 3451 | 185.4 | 18.793 | 14.5 |
-| 4 | 11616 | 8756 | 2860 | 185.0 | 15.652 | 15.5 |
-| 5 | 14523 | 11677 | 2846 | 185.0 | 15.546 | 15.5 |
+| 0 | 609 | 0 | 609 | 124.2 | 5.064 | 17.0 |
+| 1 | 3716 | 634 | 3082 | 229.9 | 13.568 | 20.9 |
+| 2 | 5249 | 3779 | 1470 | 184.2 | 8.112 | 16.1 |
+| 3 | 8693 | 5313 | 3380 | 235.0 | 14.52 | 14.1 |
+| 4 | 11617 | 8757 | 2860 | 198.1 | 14.569 | 19.7 |
+| 5 | 14485 | 11639 | 2846 | 222.3 | 12.926 | 14.3 |
 
 Per-request data: `results.json`. Engine log lines from the start: `engine-log-excerpt.txt` (when this run started the server).
 
 ## Correctness and limitations
 
-Not measured: this is a speed suite. The conversation uses the model's own replies, so token counts differ a little between runs. Machine details come from the server, `nvidia-smi`/`rocm-smi` and the OS; background load and power limits are not recorded. Total time of the suite: 650 s.
+Not measured: this is a speed suite. The conversation uses the model's own replies, so token counts differ a little between runs. Machine details come from the server, `nvidia-smi`/`rocm-smi` and the OS; background load and power limits are not recorded. Total time of the suite: 622 s.
