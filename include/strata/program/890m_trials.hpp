@@ -66,6 +66,11 @@ inline bool apply_890m_trial(const char* trial) {
         std::fprintf(stderr, "strata 890M trial: prompt-attn-fast (opt-in, validate outputs and speed)\n");
         return true;
     }
+    if (std::strcmp(trial, "qsa-select-wmma") == 0) {
+        add("STRATA_SELECT_WMMA", "1");
+        std::fprintf(stderr, "strata 890M trial: qsa-select-wmma (opt-in, validate outputs and speed)\n");
+        return true;
+    }
     return false;
 }
 } // namespace strata::program
