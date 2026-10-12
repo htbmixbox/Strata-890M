@@ -26,10 +26,12 @@ static void put(const char* k, const char* v) {
 int main() {
     using namespace strata::core;
     unset("STRATA_GFX1151_DEFAULTS");
+    unset("STRATA_GFX1150_DEFAULTS");
+    unset("STRATA_GFX1150_FAST");
     // other architectures (and CUDA, which passes an empty name): nothing
     CHECK(arch_default_env("gfx1100").empty());
-    CHECK(arch_default_env("gfx1150").empty());
     CHECK(arch_default_env("gfx1152").empty());
+    CHECK(arch_default_env("gfx11500").empty());   // not a prefix match
     CHECK(arch_default_env("gfx11510").empty());   // not a prefix match
     CHECK(arch_default_env("").empty());
     CHECK(arch_default_env(nullptr).empty());
@@ -43,6 +45,60 @@ int main() {
                                      "STRATA_SELECT_WMMA", "STRATA_HC_Q8", "STRATA_PF_HCDOWN", "STRATA_WMMA_GEMM"})
                 CHECK(kv.first != bits);
         }
+    }
+    // gfx1150 (Radeon 890M): the gfx1151 table less STRATA_HCD_EXACT, no bit-changing switch by default
+    {
+        const auto t151 = arch_default_env("gfx1151");
+        for (const char* a : {"gfx1150", "gfx1150:sramecc-:xnack-"}) {
+            const auto t = arch_default_env(a);
+            CHECK(t.size() == t151.size() - 1);
+            for (const auto& kv : t) {
+                CHECK(kv.first != "STRATA_HCD_EXACT");
+                for (const char* bits : {"STRATA_PF_GEMM", "STRATA_PF_FUSED", "STRATA_HC_UPMIX", "STRATA_PA_FAST", "STRATA_HIP_WMMA",
+                                         "STRATA_SELECT_WMMA", "STRATA_HC_Q8", "STRATA_PF_HCDOWN", "STRATA_WMMA_GEMM",
+                                         "STRATA_PF_SWITCH_MIN_T"})
+                    CHECK(kv.first != bits);
+            }
+        }
+        // the table is the gfx1151 one: every other switch of it is there
+        for (const auto& kv : t151) {
+            if (kv.first == "STRATA_HCD_EXACT") continue;
+            bool found = false;
+            for (const auto& k2 : arch_default_env("gfx1150")) found = found || (k2.first == kv.first && k2.second == kv.second);
+            CHECK(found);
+        }
+        // the opt-in rounding-level groups
+        put("STRATA_GFX1150_FAST", "1");
+        auto f1 = arch_default_env("gfx1150");
+        CHECK(f1.size() == t151.size());   // -HCD_EXACT +HIP_WMMA
+        bool wmma = false, fused = false;
+        for (const auto& kv : f1) { wmma = wmma || kv.first == "STRATA_HIP_WMMA"; fused = fused || kv.first == "STRATA_PF_FUSED"; }
+        CHECK(wmma && !fused);
+        put("STRATA_GFX1150_FAST", "2");
+        auto f2 = arch_default_env("gfx1150");
+        CHECK(f2.size() == t151.size() + 3);
+        put("STRATA_GFX1150_FAST", "0");
+        CHECK(arch_default_env("gfx1150").size() == t151.size() - 1);
+        // FAST never touches another architecture
+        put("STRATA_GFX1150_FAST", "2");
+        CHECK(arch_default_env("gfx1151").size() == t151.size());
+        unset("STRATA_GFX1150_FAST");
+        // the opt-out
+        put("STRATA_GFX1150_DEFAULTS", "0");
+        CHECK(arch_default_env("gfx1150").empty());
+        CHECK(apply_arch_defaults("gfx1150").empty());
+        unset("STRATA_GFX1150_DEFAULTS");
+        // a user's setting wins; a named hipBLASLt table is kept
+        put("STRATA_TSUM", "0");
+        put("STRATA_HIPBLASLT_TUNING", "/nonexistent/table.txt");
+        const auto set50 = apply_arch_defaults("gfx1150");
+        CHECK(std::string(std::getenv("STRATA_TSUM")) == "0");
+        CHECK(std::string(std::getenv("STRATA_HIPBLASLT_TUNING")) == "/nonexistent/table.txt");
+        CHECK(!set50.empty());
+        for (const auto& n : set50) CHECK(n != "STRATA_TSUM" && n != "STRATA_HIPBLASLT_TUNING");
+        unset("STRATA_TSUM");
+        unset("STRATA_HIPBLASLT_TUNING");
+        for (const auto& kv : t151) unset(kv.first.c_str());
     }
     // gfx12: the five prompt switches only, no decode switch, no bit-changing one
     unset("STRATA_GFX12_DEFAULTS");

@@ -7,7 +7,15 @@
 // Switches that change bits (STRATA_PF_GEMM, STRATA_PF_FUSED, STRATA_HC_UPMIX, STRATA_PA_FAST, STRATA_HIP_WMMA,
 // STRATA_SELECT_WMMA, STRATA_HC_Q8: rounding-level, KL-gated) stay opt-in; docs/STRIX_HALO.md lists them.
 //
-// A switch the user set (to anything) is never overridden; STRATA_GFX1151_DEFAULTS=0 turns the whole table off.
+// gfx1150 (Strix Point, Radeon 890M / 880M, 16 CUs) gets the gfx1151 table less STRATA_HCD_EXACT (it copies gfx1151's
+// hipBLASLt solutions, and the gfx1150 table picks others): a community 890M ran those 17 switches with identical greedy
+// answers and decode +2%, prompts +2..6% (bench/results/2026-10-07-community-gfx1150).  On gfx1150 apply_arch_defaults also
+// points STRATA_HIPBLASLT_TUNING at tools/hip/gfx1150-hipblaslt-100401.txt when it finds that file and the variable is
+// unset (prompts 1.5-1.7x faster on that machine; the engine still refuses the table for another hipBLASLt version).
+// STRATA_GFX1150_FAST=1 / 2 add rounding-level (bit-changing) prompt switches on gfx1150, opt-in only.
+//
+// A switch the user set (to anything) is never overridden; STRATA_GFX1151_DEFAULTS=0 (gfx1150: STRATA_GFX1150_DEFAULTS=0)
+// turns the whole table off.
 #pragma once
 
 #include <string>
@@ -17,7 +25,7 @@
 namespace strata::core {
 
 /// The environment settings that are the defaults of `gcn_arch` (hipDeviceProp_t::gcnArchName; "gfx1151" or
-/// "gfx1151:sramecc-:xnack-"): empty for every other architecture.
+/// "gfx1151:sramecc-:xnack-"): empty for an architecture without a table.
 std::vector<std::pair<std::string, std::string>> arch_default_env(const char* gcn_arch);
 
 /// Sets `arch_default_env(gcn_arch)` in this process's environment where the user has not set the variable, prints one
