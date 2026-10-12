@@ -63,6 +63,7 @@ from serve import logit_bias as bias_api  # noqa: E402
 from serve.winjob import contain  # noqa: E402
 from serve.structured import StructuredOutputError, prepare_format, validated_json  # noqa: E402
 from serve import responses as responses_api  # noqa: E402
+from serve.agent_890m import cached_prefix, next_waiter  # noqa: E402
 from serve.responses import ResponsesError, error_body as responses_error_body  # noqa: E402
 
 IM_END = "<|im_end|>"
@@ -771,6 +772,7 @@ class StrataEngine:
             self.admitting = 0                          # #1603: ... and those that gave the lines back to wait for a slot
             self.wait_lens: list[list[int]] = []        # ... their prompt lengths (a long read gives way to short ones)
             self.ctl_epoch = 0                          # how often the control lines were taken
+            self.ctl_ticket = 0                         # stable FIFO tie-break for opt-in 890M admission
             self.ctl = threading.Lock()                 # one admission or solo request on the control lines at a time
         self.gen = self.__dict__.get("gen", 0) + 1      # which engine process this is (a request notes its own)
         self._ctl_erred = False                         # #1059: the control lines ended on an ERR
@@ -1218,11 +1220,18 @@ class StrataEngine:
 
     YIELDS_MAX = 2   # #656: how often one request's prompt read gives way to a shorter waiting one
 
-    def _take_control(self, cancel, plen: int, after_epoch: int | None = None):
+    def _take_control(self, cancel, plen: int, after_epoch: int | None = None, prompt=None):
         """Waits for the control lines (one prompt read at a time), yielding None heartbeats; False when cancelled.
         `after_epoch`: a request whose read gave way lets the requests waiting then go first."""
-        entry = [plen]
+        # Explicit opt-in AND a 890M identity returned by the running HIP engine.
+        # Cached-prefix hints improve agent-session scheduling; the native cache
+        # remains authoritative and may discard a checkpoint at any time.
+        opt_890m = (os.environ.get("STRATA_890M_AGENT_QUEUE") == "1" and
+                    self.info.get("gpu_890m") == 1)
         with self.slot_cv:
+            self.ctl_ticket = getattr(self, "ctl_ticket", 0) + 1
+            cached = cached_prefix(prompt, self.slot_held) if opt_890m and prompt else 0
+            entry = [plen, time.monotonic(), self.ctl_ticket, plen - cached]
             self.waiting += 1
             self.wait_lens.append(entry)
         beat = time.monotonic()
@@ -1235,7 +1244,9 @@ class StrataEngine:
                     raise EngineDied("the engine stopped while this request waited; it was not sent")
                 with self.slot_cv:
                     turn = after_epoch is None or self.ctl_epoch > after_epoch or self.waiting <= 1
-                if turn and self.ctl.acquire(timeout=0.5):
+                    if opt_890m and turn:
+                        turn = next_waiter(self.wait_lens, time.monotonic()) is entry
+                if turn and self.ctl.acquire(timeout=0.05 if opt_890m else 0.5):
                     if self.alive():
                         break
                     self.ctl.release()                  # it died (or is being restarted) while this one was getting
@@ -1295,7 +1306,7 @@ class StrataEngine:
         prompt, left = list(ids), int(max_new)
         reused0 = None      # the first read's reused tokens: a continued leg's count includes this request's own output
         carry = {}          # #1869: the figures of the legs that ended in a hand-back to the solo path (the final DONE adds to them)
-        ok = yield from self._take_control(cancel, len(prompt))
+        ok = yield from self._take_control(cancel, len(prompt), prompt=prompt)
         if not ok:
             return
         holding, born = True, self.gen                  # (the engine it now has the control lines of)
@@ -1308,7 +1319,7 @@ class StrataEngine:
         try:
             while True:   # a request in a slot that is left alone goes back to the solo path
                 if not holding:
-                    ok = yield from self._take_control(cancel, len(prompt))
+                    ok = yield from self._take_control(cancel, len(prompt), prompt=prompt)
                     if not ok:
                         return
                     holding, born = True, self.gen                  # (the engine it now has the control lines of)
@@ -1405,7 +1416,7 @@ class StrataEngine:
                             if cancel.is_set():
                                 return
                             if not holding:
-                                ok = yield from self._take_control(cancel, len(prompt))
+                                ok = yield from self._take_control(cancel, len(prompt), prompt=prompt)
                                 if not ok:
                                     return
                                 holding, born = True, self.gen
@@ -1417,7 +1428,7 @@ class StrataEngine:
                         holding = False
                         with self.slot_cv:
                             epoch = self.ctl_epoch
-                        ok = yield from self._take_control(cancel, len(prompt), after_epoch=epoch)
+                        ok = yield from self._take_control(cancel, len(prompt), after_epoch=epoch, prompt=prompt)
                         if not ok:
                             return
                         holding, born = True, self.gen                  # (the engine it now has the control lines of)

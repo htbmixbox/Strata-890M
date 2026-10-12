@@ -9009,6 +9009,15 @@ int main(int argc, char** argv) {
                     slots_all += remote_experts[(size_t) r].resident();
                     mib_all += (int64_t) (remote_experts[(size_t) r].gib() * 1024.0);
                 }
+#if defined(STRATA_USE_HIP)
+            // Server-side 890M scheduling is only enabled if the *running engine*
+            // confirms its real HIP device, never from nvidia-smi inventory.
+            cudaDeviceProp info_gpu{};
+            if (cudaGetDeviceProperties(&info_gpu, 0) == cudaSuccess &&
+                strata::program::is_radeon_890m(info_gpu.name, info_gpu.gcnArchName, info_gpu.multiProcessorCount))
+                std::printf("INFO gpu_890m=1\n");
+            else (void) cudaGetLastError();
+#endif
             std::printf("INFO logit_bias=1 context=%lld kv=%s kv_resident=%lld expert_slots=%lld expert_cache_mib=%lld "
                         "expert_slots_primary=%lld expert_cache_primary_mib=%lld spec=%d "
                         "mtp_max=%d lookup=%d vram_free_mib=%lld cvec=%s arena_mib=%lld pool_workers=%d pcie_frac=%.2f "
