@@ -72,6 +72,7 @@
 #include "strata/program/split_ring.hpp"
 #include "strata/program/draft_kv_plan.hpp"
 #include "strata/program/gfx1150_890m.hpp"
+#include "strata/program/mtp_prob3_890m.hpp"
 #include "strata/program/message_boundary.hpp"
 #include "strata/spec/draft_policy.hpp"
 #include "strata/spec/draft_source.hpp"
@@ -437,6 +438,7 @@ struct Options {
     bool no_host_worker = false;
     bool prefill_890m_fusion = false; ///< --890m-prefill-fusion: gated experimental HIP fast=2 path
     bool draft_890m_source_cost = false; ///< --890m-source-cost: separate empirical lookup/MTP round curves
+    bool mtp_890m_prob3 = false; ///< --890m-mtp-prob3: 3 sequential sampled MTP proposals, exact verification
     bool coupled_draft = strata::core::coupled_draft_env(); ///< Coupled draft sampling for MTP drafter under sampling
     bool mmap_experts = false;    ///< R2.1: opt OUT of the resident arena, back to MapViewOfFile
     std::string shared_expert_arena; ///< Linux: optional file backing for the resident arena shared by processes
@@ -908,6 +910,7 @@ void usage() {
                  "                       then E-cores) or p-cores (P-cores and their siblings only).\n"
                  "  --890m-prefill-fusion  opt-in fused GEMM/prefill (Radeon 890M, gfx1150, 16 CUs ONLY)\n"
                  "  --890m-source-cost  opt-in separate measured lookup/MTP draft costs (890M only)\n"
+                 "  --890m-mtp-prob3  opt-in 3 probabilistic MTP proposals + one verify token (890M only)\n"
                  "  --coupled-draft      enable coupled draft sampling for MTP drafter under sampling (STRATA_SPEC_COUPLED)\n"
                  "  --no-coupled-draft   disable coupled draft sampling (propose argmax drafts)\n"
                  "  --mmap-experts       R2.1: opt OUT of the resident expert arena, back to MapViewOfFile.\n"
@@ -1928,6 +1931,7 @@ int main(int argc, char** argv) {
         else if (a == "--no-ple-prefetch") o.no_ple_prefetch = true;
         else if (a == "--890m-prefill-fusion") o.prefill_890m_fusion = true;
         else if (a == "--890m-source-cost") o.draft_890m_source_cost = true;
+        else if (a == "--890m-mtp-prob3") o.mtp_890m_prob3 = true;
         else if (a == "--coupled-draft") o.coupled_draft = true;
         else if (a == "--no-coupled-draft") o.coupled_draft = false;
         else parsed = false;
@@ -2157,7 +2161,7 @@ int main(int argc, char** argv) {
         }
     }
 #if !defined(STRATA_USE_HIP)
-    if (o.prefill_890m_fusion || o.draft_890m_source_cost) {
+    if (o.prefill_890m_fusion || o.draft_890m_source_cost || o.mtp_890m_prob3) {
         std::fprintf(stderr, "890M optimization flags require a HIP build\n");
         return 2;
     }
@@ -2167,7 +2171,7 @@ int main(int argc, char** argv) {
         // any engine code reads its switches (they are read at first use), and the user's own settings are kept
         cudaDeviceProp ad{};
         if (cudaGetDeviceProperties(&ad, 0) == cudaSuccess) {
-            if (o.prefill_890m_fusion || o.draft_890m_source_cost) {
+            if (o.prefill_890m_fusion || o.draft_890m_source_cost || o.mtp_890m_prob3) {
                 if (!strata::program::is_radeon_890m(ad.name, ad.gcnArchName, ad.multiProcessorCount)) {
                     std::fprintf(stderr, "--890m-prefill-fusion requires an actual Radeon 890M (gfx1150, 16 CUs)\n");
                     return 2;
@@ -2190,7 +2194,7 @@ int main(int argc, char** argv) {
             strata::core::apply_arch_defaults(ad.gcnArchName);
         } else {
             (void) cudaGetLastError();
-            if (o.prefill_890m_fusion || o.draft_890m_source_cost) { std::fprintf(stderr, "890M flags: HIP device unavailable\n"); return 2; }
+            if (o.prefill_890m_fusion || o.draft_890m_source_cost || o.mtp_890m_prob3) { std::fprintf(stderr, "890M flags: HIP device unavailable\n"); return 2; }
         }
     }
 #endif
@@ -2229,6 +2233,21 @@ int main(int argc, char** argv) {
         } else (void) cudaGetLastError();
     }
 #endif
+    if (o.mtp_890m_prob3) {
+        const std::string why = strata::program::validate_mtp_prob3(
+            o.mtp, o.spec, o.mtp_max_t, o.lookup_chain, o.spec_min_p, o.batch, o.batch_mtp);
+        if (!why.empty()) { std::fprintf(stderr, "strata generate: %s\n", why.c_str()); return 2; }
+        // Exactly 3 *sequential* draft candidates: --spec 4 has 3 drafts and
+        // 1 bonus row. Disable suffix/lookup augmentation so it stays size 4.
+        // Do not replace the verified target sampler: its residual correction
+        // is essential for retaining the target distribution under sampling.
+        o.spec = 4;
+        o.mtp_max_t = 4;
+        o.suffix_draft = 0;
+        strata::core::set_spec_prob(true);
+        o.coupled_draft = true;
+        std::fprintf(stderr, "strata: 890M probabilistic MTP: 3 sequential proposals, 4-row exact verify, no lookup\n");
+    }
     strata::core::set_coupled_draft(o.coupled_draft);
     {   // --host-core / STRATA_HOST_CORE, before the pool and the session pin any thread
         std::string hc = o.host_core;
