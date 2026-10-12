@@ -24,8 +24,8 @@ constexpr double kStaleRounds = 300.0;
 
 }  // namespace
 
-DraftPolicy::DraftPolicy(int max_t, double margin)
-    : max_t_(std::clamp(max_t, 1, kMaxT)), margin_(margin) {}
+DraftPolicy::DraftPolicy(int max_t, double margin, bool source_costs)
+    : max_t_(std::clamp(max_t, 1, kMaxT)), margin_(margin), source_costs_(source_costs) {}
 
 int DraftPolicy::bucket(int match) {
     return match < 6 ? 0 : match < 12 ? 1 : match < 24 ? 2 : 3;
@@ -36,8 +36,9 @@ double DraftPolicy::lookup_rate(int match) const {
     return (ok_[b] + kPriorN * kPriorQ[b]) / (ok_[b] + bad_[b] + kPriorN);
 }
 
-double DraftPolicy::cost_ms(int t) const {
+double DraftPolicy::cost_ms(int t, bool lookup) const {
     t = std::clamp(t, 1, kMaxT);
+    if (source_costs_ && lookup && lookup_cost_n_[t] > 0) return lookup_cost_[t];
     if (cost_n_[t] > 0) return cost_[t];
     // scale from the measured sizes, weighting each by how often it was seen
     double num = 0.0, den = 0.0;
@@ -68,7 +69,7 @@ DraftPolicy::Pick DraftPolicy::choose(int t_mtp, int lookup_k, int match) const 
     for (int k = 1; k <= std::min(lookup_k, max_t_ - 1); ++k) {
         qi *= q;
         e += qi;
-        const double r = e / cost_ms(k + 1);
+        const double r = e / cost_ms(k + 1, true);
         if (r > best) { best = r; best_t = k + 1; }
     }
     const int t_full = std::min(lookup_k, max_t_ - 1) + 1;
@@ -91,8 +92,12 @@ DraftPolicy::Pick DraftPolicy::choose(int t_mtp, int lookup_k, int match) const 
 void DraftPolicy::observe(bool lookup, int t, int accepted, int match, double round_ms) {
     t = std::clamp(t, 1, kMaxT);
     if (round_ms > 0) {
-        cost_[t] = cost_n_[t] > 0 ? (1.0 - kCostAlpha) * cost_[t] + kCostAlpha * round_ms : round_ms;
-        cost_n_[t] += 1.0;
+        // On a single-CU-constrained iGPU a lookup and an MTP verification window can
+        // have different draft overhead. Opt-in tracking avoids cross-source pollution.
+        auto& value = source_costs_ && lookup ? lookup_cost_[t] : cost_[t];
+        auto& count = source_costs_ && lookup ? lookup_cost_n_[t] : cost_n_[t];
+        value = count > 0 ? (1.0 - kCostAlpha) * value + kCostAlpha * round_ms : round_ms;
+        count += 1.0;
         last_[t] = rounds_;
     }
     rounds_ += 1.0;

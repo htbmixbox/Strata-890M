@@ -114,6 +114,18 @@ int main() {
               "chain: stale full size is re-probed despite a profitable shorter chain");
         check(probes > 0 && confident, "chain: stale re-probes retain the MTP confidence gate");
     }
+    {
+        // An unusually expensive lookup draft must not poison the MTP verification
+        // curve when the opt-in 890M source-specific estimator is used.
+        DraftPolicy separate(6, 0.03, true), legacy(6);
+        separate.observe(false, 4, 3, 30, 40.0);
+        legacy.observe(false, 4, 3, 30, 40.0);
+        separate.observe(true, 4, 0, 30, 400.0);
+        legacy.observe(true, 4, 0, 30, 400.0);
+        check(separate.cost_ms(4) == 40.0, "source costs: MTP cost unaffected by lookup slowdown");
+        check(separate.cost_ms(4, true) == 400.0, "source costs: lookup cost tracked separately");
+        check(legacy.cost_ms(4) > 40.0, "legacy shared cost curve stays unchanged");
+    }
     std::printf(g_fail ? "FAIL\n" : "PASS\n");
     return g_fail ? 1 : 0;
 }

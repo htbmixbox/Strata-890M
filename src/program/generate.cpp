@@ -436,6 +436,7 @@ struct Options {
     /// is reserved for a host thread that has nothing to do while the drain runs.
     bool no_host_worker = false;
     bool prefill_890m_fusion = false; ///< --890m-prefill-fusion: gated experimental HIP fast=2 path
+    bool draft_890m_source_cost = false; ///< --890m-source-cost: separate empirical lookup/MTP round curves
     bool coupled_draft = strata::core::coupled_draft_env(); ///< Coupled draft sampling for MTP drafter under sampling
     bool mmap_experts = false;    ///< R2.1: opt OUT of the resident arena, back to MapViewOfFile
     std::string shared_expert_arena; ///< Linux: optional file backing for the resident arena shared by processes
@@ -906,6 +907,7 @@ void usage() {
                  "                       always), auto (hybrid CPUs: P-cores first, then their SMT siblings,\n"
                  "                       then E-cores) or p-cores (P-cores and their siblings only).\n"
                  "  --890m-prefill-fusion  opt-in fused GEMM/prefill (Radeon 890M, gfx1150, 16 CUs ONLY)\n"
+                 "  --890m-source-cost  opt-in separate measured lookup/MTP draft costs (890M only)\n"
                  "  --coupled-draft      enable coupled draft sampling for MTP drafter under sampling (STRATA_SPEC_COUPLED)\n"
                  "  --no-coupled-draft   disable coupled draft sampling (propose argmax drafts)\n"
                  "  --mmap-experts       R2.1: opt OUT of the resident expert arena, back to MapViewOfFile.\n"
@@ -1925,6 +1927,7 @@ int main(int argc, char** argv) {
         else if (a == "--no-host-worker") o.no_host_worker = true;
         else if (a == "--no-ple-prefetch") o.no_ple_prefetch = true;
         else if (a == "--890m-prefill-fusion") o.prefill_890m_fusion = true;
+        else if (a == "--890m-source-cost") o.draft_890m_source_cost = true;
         else if (a == "--coupled-draft") o.coupled_draft = true;
         else if (a == "--no-coupled-draft") o.coupled_draft = false;
         else parsed = false;
@@ -2154,8 +2157,8 @@ int main(int argc, char** argv) {
         }
     }
 #if !defined(STRATA_USE_HIP)
-    if (o.prefill_890m_fusion) {
-        std::fprintf(stderr, "--890m-prefill-fusion requires a HIP build\n");
+    if (o.prefill_890m_fusion || o.draft_890m_source_cost) {
+        std::fprintf(stderr, "890M optimization flags require a HIP build\n");
         return 2;
     }
 #endif
@@ -2164,11 +2167,13 @@ int main(int argc, char** argv) {
         // any engine code reads its switches (they are read at first use), and the user's own settings are kept
         cudaDeviceProp ad{};
         if (cudaGetDeviceProperties(&ad, 0) == cudaSuccess) {
-            if (o.prefill_890m_fusion) {
+            if (o.prefill_890m_fusion || o.draft_890m_source_cost) {
                 if (!strata::program::is_radeon_890m(ad.name, ad.gcnArchName, ad.multiProcessorCount)) {
                     std::fprintf(stderr, "--890m-prefill-fusion requires an actual Radeon 890M (gfx1150, 16 CUs)\n");
                     return 2;
                 }
+            }
+            if (o.prefill_890m_fusion) {
                 const char* prev = std::getenv("STRATA_GFX1150_FAST");
                 if (prev != nullptr && std::strcmp(prev, "2") != 0) {
                     std::fprintf(stderr, "--890m-prefill-fusion conflicts with explicit STRATA_GFX1150_FAST=%s\n", prev);
@@ -2185,7 +2190,7 @@ int main(int argc, char** argv) {
             strata::core::apply_arch_defaults(ad.gcnArchName);
         } else {
             (void) cudaGetLastError();
-            if (o.prefill_890m_fusion) { std::fprintf(stderr, "--890m-prefill-fusion: HIP device unavailable\n"); return 2; }
+            if (o.prefill_890m_fusion || o.draft_890m_source_cost) { std::fprintf(stderr, "890M flags: HIP device unavailable\n"); return 2; }
         }
     }
 #endif
@@ -9090,7 +9095,7 @@ int main(int argc, char** argv) {
         // --pipeline-windows 2 loads the drafter with 8 rows: the serial loop's chain keeps its own length
         else if (use_mtp && mtp.max_t() > S_mtp) mtp.set_max_drafts(S_mtp - 1);
         strata::spec::SuffixDrafter sfx(std::max(1, o.suffix_draft), 64, (size_t) o.max_context + 4096);
-        strata::spec::DraftPolicy policy(S);   // MTP or lookup window, learned over the whole process
+        strata::spec::DraftPolicy policy(S, 0.03, o.draft_890m_source_cost);   // MTP or lookup window, learned over the whole process
         // The vision path (--vision): GENI <max_new> <embeddings file> <id,id,...> carries images.  The file is one
         // or more strata-vision records (int32 'SVE1', n, nx, ny, n_embd, then n x n_embd floats) in prompt order;
         // each image's rows go to its run of <|image_pad|> tokens, whose M-RoPE positions are mtmd's: t = p,
@@ -13018,7 +13023,7 @@ int main(int argc, char** argv) {
         const int S_mtp = o.mtp_max_t > 0 ? std::min(o.mtp_max_t, o.spec) : o.spec;
         if (use_mtp && S_mtp < o.spec) mtp.set_max_drafts(S_mtp - 1);
         strata::spec::SuffixDrafter sfx(std::max(1, o.suffix_draft), 64, (size_t) o.max_context + 4096);
-        strata::spec::DraftPolicy policy(o.spec);   // MTP or lookup window (see draft_policy.hpp)
+        strata::spec::DraftPolicy policy(o.spec, 0.03, o.draft_890m_source_cost);   // MTP or lookup window (see draft_policy.hpp)
         std::vector<int32_t> sbuf((size_t) o.spec, 0);
         int64_t sfx_windows = 0, sfx_drafts = 0, sfx_ok = 0;
         int64_t chain_windows = 0, chain_drafts = 0, chain_ok = 0;   // --lookup-chain's own counts

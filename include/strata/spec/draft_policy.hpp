@@ -24,7 +24,7 @@ public:
     static constexpr int kMaxT = 8;
     static constexpr int kBuckets = 4;
 
-    explicit DraftPolicy(int max_t, double margin = 0.03);
+    explicit DraftPolicy(int max_t, double margin = 0.03, bool source_costs = false);
 
     struct Pick {
         bool lookup = false;
@@ -44,7 +44,7 @@ public:
     void observe_chain(int t_mtp, int k, int accepted, int match, double round_ms);
     double chain_rate(int match) const;
     double lookup_rate(int match) const;   // current q for a match length
-    double cost_ms(int t) const;           // measured or scaled round time of a window of t tokens
+    double cost_ms(int t, bool lookup = false) const;  // measured or scaled round time, optionally by source
 
 private:
     static int bucket(int match);
@@ -53,7 +53,9 @@ private:
 
     int max_t_;
     double margin_;
-    std::array<double, kMaxT + 1> cost_{}, cost_n_{};      // round ms by window size
+    bool source_costs_;  // default off: legacy shared cost curve stays unchanged
+    std::array<double, kMaxT + 1> cost_{}, cost_n_{};      // MTP / legacy round ms by window size
+    std::array<double, kMaxT + 1> lookup_cost_{}, lookup_cost_n_{}; // opt-in: separate lookup EMA
     std::array<double, kMaxT + 1> mtp_tok_{}, mtp_n_{};    // tokens committed by MTP windows of that size
     std::array<double, kBuckets> ok_{}, bad_{};            // lookup drafts accepted / windows cut short, decayed
     std::array<double, kBuckets> cok_{}, cbad_{};          // chained lookup drafts, the same (reached rounds only)
