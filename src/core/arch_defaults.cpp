@@ -90,16 +90,15 @@ std::vector<std::pair<std::string, std::string>> arch_default_env(const char* gc
         if (env_is("STRATA_GFX1150_DEFAULTS", '0')) return t;
         for (auto& kv : gfx1151_table())
             if (kv.first != "STRATA_HCD_EXACT") t.push_back(std::move(kv));
-        // Level 1 experiment for Radeon 890M (gfx1150) only: enable HIP WMMA prefill
-        // unless explicitly disabled with STRATA_GFX1150_FAST=0. This changes floating-point
-        // rounding, so validate output quality and correctness as well as speed.
-        // Existing single-run evidence (table + exact switches, ~1K / 3.6K / 7K prompt):
-        // baseline 153 / 217 / 230 tok/s; STRATA_HIP_WMMA=1: 160 / 250 / 277 tok/s.
-        // Keep the fused/GEMM experiments separate; they have not been measured together.
+        // Opt-in, rounding-level (they change bits, so never part of the default table).  One run each on the 890M,
+        // added alone to the table + switches, prompts of ~1K / 3.6K / 7K tokens (153 / 217 / 230 tok/s without them):
+        //   STRATA_HIP_WMMA=1  160 / 250 / 277     STRATA_PF_FUSED=1  155 / 257 / 255     STRATA_PF_GEMM=1  166 / 243 / 262
+        // FAST=1: the best single one.  FAST=2: those three together with the short-prompt guard of docs/STRIX_HALO.md
+        // section 5 - NOT measured together on this chip; compare it against FAST=1 before keeping it.
         const char* fast = std::getenv("STRATA_GFX1150_FAST");
-        if (!(fast != nullptr && fast[0] == '0')) {
+        if (fast != nullptr && (fast[0] == '1' || fast[0] == '2')) {
             t.push_back({"STRATA_HIP_WMMA", "1"});
-            if (fast != nullptr && fast[0] == '2') {
+            if (fast[0] == '2') {
                 t.push_back({"STRATA_PF_FUSED", "1"});
                 t.push_back({"STRATA_PF_GEMM", "1"});
                 t.push_back({"STRATA_PF_SWITCH_MIN_T", "4096"});
