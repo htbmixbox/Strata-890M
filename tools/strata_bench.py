@@ -572,10 +572,14 @@ def collect_machine(base: str, key: str, cfg: dict | None) -> dict:
     eng = metrics.get("engine") or {}
     local = gpu_info_local()
     view = config_view(cfg) if cfg else {}
-    gpu_names = [g["name"] for g in local["gpus"]] or ([static["gpu_name"]] if static.get("gpu_name") else [])
     m = status.get("machine") or {}
+    # The local NVIDIA inventory is NOT an engine-device inventory. A HIP server may
+    # use the Radeon 890M while nvidia-smi sees an idle discrete GPU (e.g. an overflow
+    # tier). Prefer the GPU advertised by the running engine, then its static metrics.
+    active_gpu = (m.get("gpu") or {}).get("name") or static.get("gpu_name")
+    gpu_names = [active_gpu] if active_gpu else [g["name"] for g in local["gpus"]]
     vram_mib = (m.get("gpu") or {}).get("total_mib") or None
-    if local["gpus"] and local["gpus"][0].get("vram_mib"):
+    if vram_mib is None and not active_gpu and local["gpus"] and local["gpus"][0].get("vram_mib"):
         vram_mib = sum(g.get("vram_mib") or 0 for g in local["gpus"])
     n_ctx = None
     for d in models.get("data") or []:
