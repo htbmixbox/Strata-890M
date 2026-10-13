@@ -91,7 +91,20 @@ int main() {
         // a user's setting wins; a named hipBLASLt table is kept
         put("STRATA_TSUM", "0");
         put("STRATA_HIPBLASLT_TUNING", "/nonexistent/table.txt");
+        unset("STRATA_HIPBLASLT_HEURISTIC");
         const auto set50 = apply_arch_defaults("gfx1150");
+        // the hipBLASLt heuristic is on for gfx1150 where the user named nothing ...
+        CHECK(std::getenv("STRATA_HIPBLASLT_HEURISTIC") != nullptr && std::string(std::getenv("STRATA_HIPBLASLT_HEURISTIC")) == "1");
+        bool heur_named = false;
+        for (const auto& n : set50) heur_named = heur_named || n == "STRATA_HIPBLASLT_HEURISTIC";
+        CHECK(heur_named);
+        // ... and never overrides the user's own (0 included), nor touches another architecture
+        put("STRATA_HIPBLASLT_HEURISTIC", "0");
+        for (const auto& n : apply_arch_defaults("gfx1150")) CHECK(n != "STRATA_HIPBLASLT_HEURISTIC");
+        CHECK(std::string(std::getenv("STRATA_HIPBLASLT_HEURISTIC")) == "0");
+        unset("STRATA_HIPBLASLT_HEURISTIC");
+        for (const auto& n : apply_arch_defaults("gfx1151")) CHECK(n != "STRATA_HIPBLASLT_HEURISTIC");
+        CHECK(std::getenv("STRATA_HIPBLASLT_HEURISTIC") == nullptr);
         CHECK(std::string(std::getenv("STRATA_TSUM")) == "0");
         CHECK(std::string(std::getenv("STRATA_HIPBLASLT_TUNING")) == "/nonexistent/table.txt");
         CHECK(!set50.empty());

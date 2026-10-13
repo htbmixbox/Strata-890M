@@ -136,12 +136,16 @@ struct HipLtState {
     std::map<HipLtCallKey, HipLtCachedAlgo> cache;
     uint64_t lt_launches = 0;
     uint64_t fallbacks = 0;
+    bool heuristic = false;           // STRATA_HIPBLASLT_HEURISTIC=1: the library's own pick where the table has none
+    uint64_t heuristic_algos = 0;     // call shapes that got one
     std::set<std::tuple<strata::prefill::hipblaslt::InputType, int, int, int, int>> fallback_shapes;
 
     ~HipLtState() {
         if (std::getenv("STRATA_HIPBLASLT_VERBOSE")) {
-            std::fprintf(stderr, "prefill gemm: hipBLASLt summary launches=%llu fallbacks=%llu unique_fallback_shapes=%zu\n",
-                         (unsigned long long) lt_launches, (unsigned long long) fallbacks, fallback_shapes.size());
+            std::fprintf(stderr, "prefill gemm: hipBLASLt summary launches=%llu fallbacks=%llu unique_fallback_shapes=%zu "
+                                 "heuristic_shapes=%llu\n",
+                         (unsigned long long) lt_launches, (unsigned long long) fallbacks, fallback_shapes.size(),
+                         (unsigned long long) heuristic_algos);
             for (const auto& shape : fallback_shapes) {
                 const auto type = std::get<0>(shape);
                 std::fprintf(stderr, "prefill gemm: fallback shape dtype=%s T=%d N=%d K=%d ldy=%d\n",
@@ -183,28 +187,57 @@ struct HipLtDescriptors {
     }
 };
 
+// STRATA_HIPBLASLT_HEURISTIC=1 (on by default on gfx1150, strata/core/arch_defaults.cpp; =0 turns it off): a call shape the
+// tuning table has no row for, a row this hipBLASLt does not have, or a whole table written for another hipBLASLt version
+// (its solution ids mean nothing there) is given the library's own top-ranked algorithm (hipblasLtMatmulAlgoGetHeuristic,
+// accepted only if matmulIsAlgoSupported takes it for the real beta and the workspace fits) instead of plain hipBLASEx.
+// On the 890M a tuned hipBLASLt solution beats hipBLASEx by 1.55x to 22.6x per GEMM (bench/results/2026-10-07-community-gfx1150),
+// which is why a ROCm update used to cost 1.5-1.7x of prompt speed until the table was calibrated again.  A tuned row is never
+// replaced by it.
+bool lt_heuristic_enabled() {
+    static const bool on = [] {
+        const char* v = std::getenv("STRATA_HIPBLASLT_HEURISTIC");
+        return v != nullptr && v[0] == '1';
+    }();
+    return on;
+}
+
 std::unique_ptr<HipLtState> create_hipblaslt_state(void* workspace, size_t workspace_bytes) {
     const char* path = std::getenv("STRATA_HIPBLASLT_TUNING");
-    if (!path || !*path) return nullptr;
+    const bool have_table = path && *path;
+    const bool heuristic = lt_heuristic_enabled();
+    if (!have_table && !heuristic) return nullptr;
 
     auto state = std::make_unique<HipLtState>();
     state->workspace = workspace;
     state->workspace_bytes = workspace_bytes;
+    state->heuristic = heuristic;
     if (hipblasLtCreate(&state->handle) != HIPBLAS_STATUS_SUCCESS) {
         std::fprintf(stderr, "prefill gemm: hipBLASLt handle creation failed; using hipBLASEx\n");
         return nullptr;
     }
+    if (!have_table) {
+        std::fprintf(stderr, "prefill gemm: hipBLASLt heuristic enabled (no tuning table named)\n");
+        return state;
+    }
+
+    // Why the table cannot be used: said, and then either hipBLASEx (as before) or the heuristic.  true = keep the state.
+    const auto table_failed = [&](const std::string& why) {
+        state->table = strata::prefill::hipblaslt::TuningTable();   // a half-read table is no table
+        std::fprintf(stderr, "prefill gemm: %s; using %s\n", why.c_str(), state->heuristic ? "the hipBLASLt heuristic" : "hipBLASEx");
+        return state->heuristic;
+    };
 
     int version = 0;
     if (hipblasLtGetVersion(state->handle, &version) != HIPBLAS_STATUS_SUCCESS) {
-        std::fprintf(stderr, "prefill gemm: hipBLASLt version query failed; using hipBLASEx\n");
-        return nullptr;
+        if (!table_failed("hipBLASLt version query failed")) return nullptr;
+        return state;
     }
     int device = 0;
     hipDeviceProp_t properties{};
     if (hipGetDevice(&device) != hipSuccess || hipGetDeviceProperties(&properties, device) != hipSuccess) {
-        std::fprintf(stderr, "prefill gemm: HIP device query failed; using hipBLASEx\n");
-        return nullptr;
+        if (!table_failed("HIP device query failed")) return nullptr;
+        return state;
     }
     std::string arch(properties.gcnArchName);
     const auto suffix = arch.find(':');
@@ -212,12 +245,58 @@ std::unique_ptr<HipLtState> create_hipblaslt_state(void* workspace, size_t works
 
     std::string error;
     if (!state->table.load(path, arch, version, error)) {
-        std::fprintf(stderr, "prefill gemm: %s; using hipBLASEx\n", error.c_str());
-        return nullptr;
+        if (!table_failed(error)) return nullptr;
+        return state;
     }
     std::fprintf(stderr, "prefill gemm: hipBLASLt tuning enabled (%zu rows, %s, version %d)\n",
                  state->table.rows().size(), arch.c_str(), version);
     return state;
+}
+
+// The library's own top-ranked algorithm for this call (see lt_heuristic_enabled); supported == false when it has none.
+HipLtCachedAlgo lt_heuristic_algo(HipLtState& state, hipDataType input_type,
+                                  strata::prefill::hipblaslt::InputType type, int t, int n, int k, int ldy, float beta,
+                                  bool verbose) {
+    HipLtCachedAlgo out;
+    HipLtDescriptors desc;
+    if (!desc.init(input_type, t, n, k, ldy)) return out;
+    hipblasLtMatmulPreference_t pref = nullptr;
+    if (hipblasLtMatmulPreferenceCreate(&pref) != HIPBLAS_STATUS_SUCCESS) return out;
+    const uint64_t limit = state.workspace_bytes;
+    hipblasLtMatmulHeuristicResult_t found[8]{};
+    int count = 0;
+    const bool queried =
+        hipblasLtMatmulPreferenceSetAttribute(pref, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &limit, sizeof(limit)) ==
+            HIPBLAS_STATUS_SUCCESS &&
+        hipblasLtMatmulAlgoGetHeuristic(state.handle, desc.op, desc.a, desc.b, desc.c, desc.c, pref, 8, found, &count) ==
+            HIPBLAS_STATUS_SUCCESS;
+    hipblasLtMatmulPreferenceDestroy(pref);
+    if (!queried || count <= 0) {
+        if (verbose)
+            std::fprintf(stderr, "prefill gemm: Lt heuristic offers nothing for dtype=%s T=%d N=%d K=%d ldy=%d\n",
+                         type == strata::prefill::hipblaslt::InputType::bf16 ? "bf16" : "f16", t, n, k, ldy);
+        return out;
+    }
+    const float alpha = 1.0f;
+    for (int i = 0; i < count; ++i) {
+        if (found[i].state != HIPBLAS_STATUS_SUCCESS) continue;
+        auto algo = found[i].algo;
+        size_t required = 0;
+        if (hipblaslt_ext::matmulIsAlgoSupported(state.handle, desc.op, &alpha, desc.a, desc.b, &beta, desc.c, desc.c,
+                                                 algo, required) != HIPBLAS_STATUS_SUCCESS ||
+            required > state.workspace_bytes)
+            continue;
+        out.supported = true;
+        out.algo = algo;
+        out.workspace_bytes = required;
+        ++state.heuristic_algos;
+        if (verbose)
+            std::fprintf(stderr, "prefill gemm: Lt heuristic solution=%d dtype=%s T=%d N=%d K=%d ldy=%d beta=%.9g workspace=%zu\n",
+                         hipblaslt_ext::getIndexFromAlgo(algo),
+                         type == strata::prefill::hipblaslt::InputType::bf16 ? "bf16" : "f16", t, n, k, ldy, beta, required);
+        return out;
+    }
+    return out;
 }
 
 HipLtCachedAlgo resolve_hipblaslt_algo(HipLtState& state, strata::prefill::hipblaslt::InputType type, int t,
@@ -231,19 +310,24 @@ HipLtCachedAlgo resolve_hipblaslt_algo(HipLtState& state, strata::prefill::hipbl
 
     HipLtCachedAlgo resolved;
     const bool verbose = std::getenv("STRATA_HIPBLASLT_VERBOSE") != nullptr;
+    const hipDataType input_type = type == strata::prefill::hipblaslt::InputType::bf16 ? HIP_R_16BF : HIP_R_16F;
+    // nothing usable from the table: the library's own pick (STRATA_HIPBLASLT_HEURISTIC), else unsupported (hipBLASEx)
+    const auto no_table_algo = [&]() -> HipLtCachedAlgo {
+        if (state.heuristic) resolved = lt_heuristic_algo(state, input_type, type, t, n, k, ldy, beta, verbose);
+        return state.cache.emplace(key, resolved).first->second;
+    };
     const auto* row = state.table.closest(type, n, k, ldy, t);
     if (!row) {
         if (verbose) {
             std::fprintf(stderr, "prefill gemm: Lt fallback; no calibration for dtype=%s T=%d N=%d K=%d ldy=%d\n",
                          type == strata::prefill::hipblaslt::InputType::bf16 ? "bf16" : "f16", t, n, k, ldy);
         }
-        return state.cache.emplace(key, resolved).first->second;
+        return no_table_algo();
     }
 
     HipLtDescriptors desc;
-    const hipDataType input_type = type == strata::prefill::hipblaslt::InputType::bf16 ? HIP_R_16BF : HIP_R_16F;
     if (!desc.init(input_type, t, n, k, ldy)) {
-        return state.cache.emplace(key, resolved).first->second;
+        return no_table_algo();
     }
 
     std::vector<int> solution_ids{row->solution_id};
@@ -255,7 +339,7 @@ HipLtCachedAlgo resolve_hipblaslt_algo(HipLtState& state, strata::prefill::hipbl
             std::fprintf(stderr, "prefill gemm: Lt fallback; solution %d unavailable for T=%d N=%d K=%d ldy=%d\n",
                          row->solution_id, t, n, k, ldy);
         }
-        return state.cache.emplace(key, resolved).first->second;
+        return no_table_algo();
     }
 
     const float alpha = 1.0f;
@@ -267,7 +351,7 @@ HipLtCachedAlgo resolve_hipblaslt_algo(HipLtState& state, strata::prefill::hipbl
             std::fprintf(stderr, "prefill gemm: Lt fallback; solution %d rejects actual T=%d N=%d K=%d ldy=%d beta=%.9g\n",
                          row->solution_id, t, n, k, ldy, beta);
         }
-        return state.cache.emplace(key, resolved).first->second;
+        return no_table_algo();
     }
 
     resolved.supported = true;

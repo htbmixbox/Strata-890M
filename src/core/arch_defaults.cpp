@@ -154,8 +154,20 @@ std::vector<std::string> apply_arch_defaults(const char* gcn_arch) {
         for (size_t i = 0; i < set.size(); ++i) std::fprintf(stderr, "%s%s", i ? " " : "", set[i].c_str() + 7);
         std::fprintf(stderr, "\n");
     }
+    // gfx1150: the hipBLASLt heuristic for the prompt's dense GEMMs that no tuning row covers (a ROCm other than the table's
+    // 100401, or a model with other shapes): the library's own pick instead of plain hipBLASEx, never in place of a tuned row
+    // (prefill/gemm.cu).  STRATA_HIPBLASLT_HEURISTIC=0 keeps hipBLASEx there, as before.
+    if (g50 && !env_is("STRATA_GFX1150_DEFAULTS", '0') && std::getenv("STRATA_HIPBLASLT_HEURISTIC") == nullptr) {
+#if defined(_WIN32)
+        _putenv_s("STRATA_HIPBLASLT_HEURISTIC", "1");
+#else
+        setenv("STRATA_HIPBLASLT_HEURISTIC", "1", 0);
+#endif
+        set.push_back("STRATA_HIPBLASLT_HEURISTIC");
+    }
     // gfx1150: the hipBLASLt table for the prompt's dense GEMMs, when the user has not named one.  The engine checks the
-    // header (architecture and hipBLASLt version) and says so and keeps hipBLASEx if it does not fit this ROCm.
+    // header (architecture and hipBLASLt version) and says so and uses the heuristic (hipBLASEx with the heuristic off) if
+    // it does not fit this ROCm.
     if (g50 && !env_is("STRATA_GFX1150_DEFAULTS", '0') && std::getenv("STRATA_HIPBLASLT_TUNING") == nullptr) {
         const std::string table = find_gfx1150_table();
         if (!table.empty()) {
@@ -169,7 +181,9 @@ std::vector<std::string> apply_arch_defaults(const char* gcn_arch) {
             set.push_back("STRATA_HIPBLASLT_TUNING");
         } else {
             std::fprintf(stderr, "strata: gfx1150: tools/hip/%s not found near the engine or the working directory: the prompt's "
-                                 "dense GEMMs run on plain hipBLAS (1.5-1.7x slower reads); set STRATA_HIPBLASLT_TUNING to it\n",
+                                 "dense GEMMs run on the hipBLASLt heuristic, not the tuned solutions (set "
+                                 "STRATA_HIPBLASLT_TUNING to the table; with STRATA_HIPBLASLT_HEURISTIC=0: plain hipBLAS, 1.5-1.7x "
+                                 "slower reads)\n",
                          kGfx1150Table);
         }
     }

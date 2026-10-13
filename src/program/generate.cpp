@@ -71,6 +71,7 @@
 #include "strata/platform/host_limits.hpp"
 #include "strata/program/split_ring.hpp"
 #include "strata/program/draft_kv_plan.hpp"
+#include "strata/program/gfx1150_890m.hpp"
 #include "strata/program/message_boundary.hpp"
 #include "strata/spec/draft_policy.hpp"
 #include "strata/spec/draft_source.hpp"
@@ -434,6 +435,7 @@ struct Options {
     /// pool's own drain: 33.7 GB/s against 5/6 x 44.14 = 36.8 for five workers, on a machine whose sixth core
     /// is reserved for a host thread that has nothing to do while the drain runs.
     bool no_host_worker = false;
+    bool prefill_890m_fusion = false; ///< --890m-prefill-fusion: gated experimental HIP fast=2 path
     bool coupled_draft = strata::core::coupled_draft_env(); ///< Coupled draft sampling for MTP drafter under sampling
     bool mmap_experts = false;    ///< R2.1: opt OUT of the resident arena, back to MapViewOfFile
     std::string shared_expert_arena; ///< Linux: optional file backing for the resident arena shared by processes
@@ -903,6 +905,7 @@ void usage() {
                  "  --pool-affinity MODE Worker CPU affinity: all (default: one worker per physical core, as\n"
                  "                       always), auto (hybrid CPUs: P-cores first, then their SMT siblings,\n"
                  "                       then E-cores) or p-cores (P-cores and their siblings only).\n"
+                 "  --890m-prefill-fusion  opt-in fused GEMM/prefill (Radeon 890M, gfx1150, 16 CUs ONLY)\n"
                  "  --coupled-draft      enable coupled draft sampling for MTP drafter under sampling (STRATA_SPEC_COUPLED)\n"
                  "  --no-coupled-draft   disable coupled draft sampling (propose argmax drafts)\n"
                  "  --mmap-experts       R2.1: opt OUT of the resident expert arena, back to MapViewOfFile.\n"
@@ -1921,6 +1924,7 @@ int main(int argc, char** argv) {
         }
         else if (a == "--no-host-worker") o.no_host_worker = true;
         else if (a == "--no-ple-prefetch") o.no_ple_prefetch = true;
+        else if (a == "--890m-prefill-fusion") o.prefill_890m_fusion = true;
         else if (a == "--coupled-draft") o.coupled_draft = true;
         else if (a == "--no-coupled-draft") o.coupled_draft = false;
         else parsed = false;
@@ -2149,12 +2153,40 @@ int main(int argc, char** argv) {
         }
         }
     }
+#if !defined(STRATA_USE_HIP)
+    if (o.prefill_890m_fusion) {
+        std::fprintf(stderr, "--890m-prefill-fusion requires a HIP build\n");
+        return 2;
+    }
+#endif
 #if defined(STRATA_USE_HIP)
     {   // gfx1151 (Strix Halo): the switches that are exact there are on by default (strata/core/arch_defaults.hpp); before
         // any engine code reads its switches (they are read at first use), and the user's own settings are kept
         cudaDeviceProp ad{};
-        if (cudaGetDeviceProperties(&ad, 0) == cudaSuccess) strata::core::apply_arch_defaults(ad.gcnArchName);
-        else (void) cudaGetLastError();
+        if (cudaGetDeviceProperties(&ad, 0) == cudaSuccess) {
+            if (o.prefill_890m_fusion) {
+                if (!strata::program::is_radeon_890m(ad.name, ad.gcnArchName, ad.multiProcessorCount)) {
+                    std::fprintf(stderr, "--890m-prefill-fusion requires an actual Radeon 890M (gfx1150, 16 CUs)\n");
+                    return 2;
+                }
+                const char* prev = std::getenv("STRATA_GFX1150_FAST");
+                if (prev != nullptr && std::strcmp(prev, "2") != 0) {
+                    std::fprintf(stderr, "--890m-prefill-fusion conflicts with explicit STRATA_GFX1150_FAST=%s\n", prev);
+                    return 2;
+                }
+                // Reuse the existing fused prefill/GEMM implementation, with no new numerical behavior.
+#if defined(_WIN32)
+                _putenv_s("STRATA_GFX1150_FAST", "2");
+#else
+                setenv("STRATA_GFX1150_FAST", "2", 1);
+#endif
+                std::fprintf(stderr, "strata: opt-in Radeon 890M fused prefill/GEMM (gfx1150 fast=2); validate logits and speed\n");
+            }
+            strata::core::apply_arch_defaults(ad.gcnArchName);
+        } else {
+            (void) cudaGetLastError();
+            if (o.prefill_890m_fusion) { std::fprintf(stderr, "--890m-prefill-fusion: HIP device unavailable\n"); return 2; }
+        }
     }
 #endif
 #if defined(STRATA_USE_HIP) && !defined(_WIN32)
